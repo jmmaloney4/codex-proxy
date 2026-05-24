@@ -37,20 +37,21 @@ type HTTPClient interface {
 }
 
 type Server struct {
-	credsFetcher        credentials.CredentialsFetcher
-	httpClient          HTTPClient
-	mux                 *http.ServeMux
-	logger              zerolog.Logger
-	adminAuthDisabled   bool
+	credsFetcher      credentials.CredentialsFetcher
+	httpClient        HTTPClient
+	mux               *http.ServeMux
+	logger            zerolog.Logger
+	adminAuthDisabled bool
 }
 
 func New(logger zerolog.Logger, credsFetcher credentials.CredentialsFetcher) *Server {
+	val, _ := env.Get("DISABLE_ADMIN_AUTH")
 	s := &Server{
 		credsFetcher:      credsFetcher,
 		httpClient:        NewHTTPClient(),
 		mux:               http.NewServeMux(),
 		logger:            logger,
-		adminAuthDisabled: env.Get("DISABLE_ADMIN_AUTH") != "",
+		adminAuthDisabled: val != "",
 	}
 
 	if s.adminAuthDisabled {
