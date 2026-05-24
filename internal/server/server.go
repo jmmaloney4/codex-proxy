@@ -61,6 +61,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/health", s.healthHandler)
 	s.mux.HandleFunc("/admin/credentials", s.adminMiddleware(s.credentialsHandler))
 	s.mux.HandleFunc("/admin/credentials/status", s.adminMiddleware(s.credentialsStatusHandler))
+	s.mux.HandleFunc("/admin/codex/usage", s.adminMiddleware(s.codexUsageHandler))
 	s.mux.HandleFunc("/", s.notFoundHandler)
 }
 
@@ -989,4 +990,67 @@ func (s *Server) credentialsStatusHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// codexUsageHandler handles GET /admin/codex/usage
+// Returns raw usage information for the current Codex account by calling the
+// upstream wham usage endpoint. Requires admin authentication.
+func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	oauthFetcher, ok := s.credsFetcher.(credentials.OAuthCredentialsFetcher)
+	if !ok {
+		s.logger.Error().Msg("Credentials fetcher does not support OAuth operations")
+		http.Error(w, "OAuth operations not supported by current credential fetcher", http.StatusBadRequest)
+		return
+	}
+
+	creds, err := oauthFetcher.GetFullCredentials()
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to get full credentials for usage lookup")
+		http.Error(w, "Failed to retrieve credentials", http.StatusInternalServerError)
+		return
+	}
+
+	if creds.UserID == "" || creds.AccessToken == "" {
+		http.Error(w, "Missing account ID or access token in credentials", http.StatusBadRequest)
+		return
+	}
+
+	// Upstream wham usage endpoint (undocumented). Raw passthrough for forward compatibility.
+	usageURL := fmt.Sprintf("https://chatgpt.com/backend-api/accounts/%s/usage", creds.UserID)
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, usageURL, nil)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to create usage request")
+		http.Error(w, "Failed to create upstream request", http.StatusInternalServerError)
+		return
+	}
+
+	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Upstream usage request failed")
+		http.Error(w, "Failed to fetch usage from upstream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Raw passthrough of status, headers, and body
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to copy usage response body")
+	}
 }
