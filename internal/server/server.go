@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dvcrn/codex-proxy/internal/credentials"
+	"github.com/dvcrn/codex-proxy/internal/env"
 	"github.com/rs/zerolog"
 )
 
@@ -36,18 +37,24 @@ type HTTPClient interface {
 }
 
 type Server struct {
-	credsFetcher credentials.CredentialsFetcher
-	httpClient   HTTPClient
-	mux          *http.ServeMux
-	logger       zerolog.Logger
+	credsFetcher        credentials.CredentialsFetcher
+	httpClient          HTTPClient
+	mux                 *http.ServeMux
+	logger              zerolog.Logger
+	adminAuthDisabled   bool
 }
 
 func New(logger zerolog.Logger, credsFetcher credentials.CredentialsFetcher) *Server {
 	s := &Server{
-		credsFetcher: credsFetcher,
-		httpClient:   NewHTTPClient(),
-		mux:          http.NewServeMux(),
-		logger:       logger,
+		credsFetcher:      credsFetcher,
+		httpClient:        NewHTTPClient(),
+		mux:               http.NewServeMux(),
+		logger:            logger,
+		adminAuthDisabled: env.Get("DISABLE_ADMIN_AUTH") != "",
+	}
+
+	if s.adminAuthDisabled {
+		logger.Warn().Msg("DISABLE_ADMIN_AUTH is set — admin routes are unprotected (intended only for internal/cluster deploys)")
 	}
 
 	s.setupRoutes()

@@ -9,10 +9,9 @@ import (
 
 // adminMiddleware checks for valid admin API key from either
 // 'Authorization: Bearer *** or 'X-API-Key: <key>' headers.
-// If DISABLE_ADMIN_AUTH is set, the middleware becomes a no-op (for internal deploys).
+// If adminAuthDisabled is true, the middleware becomes a no-op.
 func (s *Server) adminMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	if _, disabled := env.Get("DISABLE_ADMIN_AUTH"); disabled {
-		s.logger.Warn().Msg("DISABLE_ADMIN_AUTH is set — admin routes are unprotected (intended only for internal/cluster deploys)")
+	if s.adminAuthDisabled {
 		return next
 	}
 
