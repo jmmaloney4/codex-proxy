@@ -1032,9 +1032,9 @@ func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
 
 	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("Upstream usage request failed")
 		http.Error(w, "Failed to fetch usage from upstream", http.StatusBadGateway)
