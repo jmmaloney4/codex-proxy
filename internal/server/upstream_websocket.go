@@ -17,7 +17,7 @@ import (
 
 const (
 	websocketResponsesBetaHeader = "responses_websockets=2026-02-04"
-	websocketResponsesVersion    = "0.101.0"
+	websocketResponsesVersion    = "0.135.0"
 )
 
 func supportsWebSocketUpstream() bool {
