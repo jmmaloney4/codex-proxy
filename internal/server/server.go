@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -1001,37 +1002,34 @@ func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthFetcher, ok := s.credsFetcher.(credentials.OAuthCredentialsFetcher)
-	if !ok {
-		s.logger.Error().Msg("Credentials fetcher does not support OAuth operations")
-		http.Error(w, "OAuth operations not supported by current credential fetcher", http.StatusBadRequest)
-		return
-	}
-
-	creds, err := oauthFetcher.GetFullCredentials()
+	token, userID, err := s.credsFetcher.GetCredentials()
 	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to get full credentials for usage lookup")
+		s.logger.Error().Err(err).Msg("Failed to get credentials for usage lookup")
 		http.Error(w, "Failed to retrieve credentials", http.StatusInternalServerError)
 		return
 	}
 
-	if creds.UserID == "" || creds.AccessToken == "" {
+	if token == "" || userID == "" {
 		http.Error(w, "Missing account ID or access token in credentials", http.StatusBadRequest)
 		return
 	}
 
 	// Upstream wham usage endpoint (undocumented). Raw passthrough for forward compatibility.
-	usageURL := fmt.Sprintf("https://chatgpt.com/backend-api/accounts/%s/usage", creds.UserID)
+	usageURL := fmt.Sprintf("https://chatgpt.com/backend-api/accounts/%s/usage", userID)
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, usageURL, nil)
+	// Apply a 15s timeout scoped to this request only (s.httpClient has no Timeout for SSE streaming).
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to create usage request")
 		http.Error(w, "Failed to create upstream request", http.StatusInternalServerError)
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("chatgpt-account-id", userID)
 	req.Header.Set("User-Agent", "codex-proxy/1.0")
 
 	resp, err := s.httpClient.Do(req)
@@ -1042,8 +1040,22 @@ func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Raw passthrough of status, headers, and body
+	// Strip hop-by-hop headers before proxying the response.
+	hopByHopHeaders := map[string]bool{
+		"Connection":          true,
+		"Keep-Alive":          true,
+		"Proxy-Authenticate":  true,
+		"Proxy-Authorization": true,
+		"TE":                  true,
+		"Trailers":            true,
+		"Transfer-Encoding":   true,
+		"Upgrade":             true,
+	}
+
 	for key, values := range resp.Header {
+		if hopByHopHeaders[key] {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
