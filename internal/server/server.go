@@ -1028,7 +1028,13 @@ func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
+	// Normalize token to avoid double "Bearer " prefix
+	bareToken := strings.TrimSpace(token)
+	if len(bareToken) >= 7 && strings.EqualFold(bareToken[:7], "Bearer ") {
+		bareToken = strings.TrimSpace(bareToken[7:])
+	}
+
+	req.Header.Set("Authorization", "Bearer "+bareToken)
 	req.Header.Set("chatgpt-account-id", userID)
 	req.Header.Set("User-Agent", "codex-proxy/1.0")
 
@@ -1047,7 +1053,7 @@ func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
 		"Proxy-Authenticate":  true,
 		"Proxy-Authorization": true,
 		"TE":                  true,
-		"Trailers":            true,
+		"Trailer":             true,
 		"Transfer-Encoding":   true,
 		"Upgrade":             true,
 	}
