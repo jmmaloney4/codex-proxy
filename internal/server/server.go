@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -61,6 +62,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/health", s.healthHandler)
 	s.mux.HandleFunc("/admin/credentials", s.adminMiddleware(s.credentialsHandler))
 	s.mux.HandleFunc("/admin/credentials/status", s.adminMiddleware(s.credentialsStatusHandler))
+	s.mux.HandleFunc("/admin/codex/usage", s.adminMiddleware(s.codexUsageHandler))
 	s.mux.HandleFunc("/", s.notFoundHandler)
 }
 
@@ -989,4 +991,84 @@ func (s *Server) credentialsStatusHandler(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// codexUsageHandler handles GET /admin/codex/usage
+// Returns raw usage information for the current Codex account by calling the
+// upstream wham usage endpoint. Requires admin authentication.
+func (s *Server) codexUsageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	token, userID, err := s.credsFetcher.GetCredentials()
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to get credentials for usage lookup")
+		http.Error(w, "Failed to retrieve credentials", http.StatusInternalServerError)
+		return
+	}
+
+	if token == "" || userID == "" {
+		http.Error(w, "Missing account ID or access token in credentials", http.StatusBadRequest)
+		return
+	}
+
+	// Upstream wham usage endpoint (undocumented). Raw passthrough for forward compatibility.
+	usageURL := fmt.Sprintf("https://chatgpt.com/backend-api/accounts/%s/usage", userID)
+
+	// Apply a 15s timeout scoped to this request only (s.httpClient has no Timeout for SSE streaming).
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to create usage request")
+		http.Error(w, "Failed to create upstream request", http.StatusInternalServerError)
+		return
+	}
+
+	// Normalize token to avoid double "Bearer " prefix
+	bareToken := strings.TrimSpace(token)
+	if len(bareToken) >= 7 && strings.EqualFold(bareToken[:7], "Bearer ") {
+		bareToken = strings.TrimSpace(bareToken[7:])
+	}
+
+	req.Header.Set("Authorization", "Bearer "+bareToken)
+	req.Header.Set("chatgpt-account-id", userID)
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Upstream usage request failed")
+		http.Error(w, "Failed to fetch usage from upstream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Strip hop-by-hop headers before proxying the response.
+	hopByHopHeaders := map[string]bool{
+		"Connection":          true,
+		"Keep-Alive":          true,
+		"Proxy-Authenticate":  true,
+		"Proxy-Authorization": true,
+		"TE":                  true,
+		"Trailer":             true,
+		"Transfer-Encoding":   true,
+		"Upgrade":             true,
+	}
+
+	for key, values := range resp.Header {
+		if hopByHopHeaders[key] {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to copy usage response body")
+	}
 }
