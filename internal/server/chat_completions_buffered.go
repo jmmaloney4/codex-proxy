@@ -29,6 +29,10 @@ type streamingChunk struct {
 	Created int64             `json:"created"`
 	Model   string            `json:"model"`
 	Choices []streamingChoice `json:"choices"`
+	// Usage is carried only by the final chunk emitted by the SSE transformer
+	// (see transform.go). Capturing it here lets the buffered, non-streaming
+	// response report real token counts instead of omitting usage.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // bufferChatCompletionFromSSE consumes an upstream Codex SSE stream, uses the SSETransformer
@@ -49,6 +53,7 @@ func bufferChatCompletionFromSSE(body io.Reader, model string) (*ChatCompletionR
 		role           string
 		contentBuilder bytes.Buffer
 		finishReason   string
+		usage          *Usage
 	)
 
 	flushEvent := func() error {
@@ -90,6 +95,10 @@ func bufferChatCompletionFromSSE(body io.Reader, model string) (*ChatCompletionR
 			}
 			if created == 0 && chunk.Created != 0 {
 				created = chunk.Created
+			}
+
+			if chunk.Usage != nil {
+				usage = chunk.Usage
 			}
 
 			for _, ch := range chunk.Choices {
@@ -167,6 +176,14 @@ func bufferChatCompletionFromSSE(body io.Reader, model string) (*ChatCompletionR
 		finishReason = "stop"
 	}
 
+	// Carry through the usage captured from the stream's final chunk. If the
+	// stream never reported usage, the zero-valued Usage{} still serializes a
+	// well-formed object, matching the streaming transformer's fallback.
+	var respUsage Usage
+	if usage != nil {
+		respUsage = *usage
+	}
+
 	resp := &ChatCompletionResponse{
 		ID:      responseID,
 		Object:  "chat.completion",
@@ -182,6 +199,7 @@ func bufferChatCompletionFromSSE(body io.Reader, model string) (*ChatCompletionR
 				FinishReason: finishReason,
 			},
 		},
+		Usage: respUsage,
 	}
 	return resp, nil
 }
