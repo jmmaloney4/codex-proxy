@@ -7,11 +7,3 @@ type TokenRefreshResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	Scope        string `json:"scope,omitempty"`
 }
-
-// TokenRefreshRequest represents the OAuth token refresh API request
-type TokenRefreshRequest struct {
-	GrantType    string `json:"grant_type"`
-	RefreshToken string `json:"refresh_token"`
-	ClientID     string `json:"client_id"`
-	Scope        string `json:"scope"`
-}

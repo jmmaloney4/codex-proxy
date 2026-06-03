@@ -40,10 +40,15 @@ func (o *OAuthFetcher) GetCredentials() (string, string, error) {
 		return "", "", fmt.Errorf("failed to get full credentials: %w", err)
 	}
 
+	// Trust the token's own `exp` claim over the stored expiresAt, which can
+	// drift (wrong units, hand-edited secrets, a refresh that happened in
+	// another writer). Falls back to the stored value for non-JWT tokens.
+	expiresAtMs := AccessTokenExpiresAtMs(creds.AccessToken, creds.ExpiresAt)
+
 	// Check if token needs refresh
-	if TokenExpired(creds.ExpiresAt) {
+	if TokenExpired(expiresAtMs) {
 		if o.logger != nil {
-			minutesUntilExpiry := (creds.ExpiresAt - UnixMillis()) / 1000 / 60
+			minutesUntilExpiry := (expiresAtMs - UnixMillis()) / 1000 / 60
 			o.logger.Info().
 				Int64("minutes_until_expiry", minutesUntilExpiry).
 				Msg("🔄 OAuth token expired or expiring soon, refreshing...")
@@ -57,7 +62,7 @@ func (o *OAuthFetcher) GetCredentials() (string, string, error) {
 			}
 			// Return existing credentials even if refresh failed
 			// The server will handle 401 responses
-			return creds.AccessToken, creds.UserID, nil
+			return creds.AccessToken, accountID(creds.AccessToken, creds.UserID), nil
 		}
 
 		// Calculate new expiry time
@@ -69,25 +74,32 @@ func (o *OAuthFetcher) GetCredentials() (string, string, error) {
 				o.logger.Error().Err(err).Msg("❌ Failed to update tokens in storage")
 			}
 			// Return new tokens even if storage update failed
-			return newTokens.AccessToken, creds.UserID, nil
+			return newTokens.AccessToken, accountID(newTokens.AccessToken, creds.UserID), nil
 		}
 
 		if o.logger != nil {
 			o.logger.Info().Msg("✅ OAuth token refreshed successfully")
 		}
 
-		return newTokens.AccessToken, creds.UserID, nil
+		return newTokens.AccessToken, accountID(newTokens.AccessToken, creds.UserID), nil
 	}
 
 	// Token is still valid
 	if o.logger != nil {
-		minutesUntilExpiry := (creds.ExpiresAt - UnixMillis()) / 1000 / 60
+		minutesUntilExpiry := (expiresAtMs - UnixMillis()) / 1000 / 60
 		o.logger.Debug().
 			Int64("minutes_until_expiry", minutesUntilExpiry).
 			Msg("✅ OAuth token is still valid")
 	}
 
-	return creds.AccessToken, creds.UserID, nil
+	return creds.AccessToken, accountID(creds.AccessToken, creds.UserID), nil
+}
+
+// accountID resolves the chatgpt-account-id to send upstream, preferring the
+// value embedded in the access token's JWT claim (which can never disagree with
+// the token) and falling back to the separately-stored id.
+func accountID(accessToken, stored string) string {
+	return AccountIDFromJWT(accessToken, stored)
 }
 
 // RefreshCredentials forces a token refresh
@@ -169,10 +181,11 @@ func (o *OAuthFetcher) checkAndRefreshToken() {
 		return
 	}
 
-	// Check if token needs refresh
-	if !TokenExpired(creds.ExpiresAt) {
+	// Check if token needs refresh (trust the JWT exp over stored expiresAt).
+	expiresAtMs := AccessTokenExpiresAtMs(creds.AccessToken, creds.ExpiresAt)
+	if !TokenExpired(expiresAtMs) {
 		if o.logger != nil {
-			minutesUntilExpiry := (creds.ExpiresAt - UnixMillis()) / 1000 / 60
+			minutesUntilExpiry := (expiresAtMs - UnixMillis()) / 1000 / 60
 			o.logger.Debug().
 				Int64("minutes_until_expiry", minutesUntilExpiry).
 				Msg("Background refresh: token still valid")
