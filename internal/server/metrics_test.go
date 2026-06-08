@@ -135,6 +135,47 @@ func TestStatusRecorderDefaultsTo200OnWrite(t *testing.T) {
 	}
 }
 
+func TestUsageFromUpstreamResponseEvent(t *testing.T) {
+	completed := []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":7,"total_tokens":57}}}`)
+	u, ok := usageFromUpstreamResponseEvent(completed)
+	if !ok || u.PromptTokens != 50 || u.CompletionTokens != 7 || u.TotalTokens != 57 {
+		t.Fatalf("unexpected parse: %+v ok=%v", u, ok)
+	}
+
+	// prompt_tokens/completion_tokens variant.
+	alt := []byte(`{"type":"response.completed","response":{"usage":{"prompt_tokens":9,"completion_tokens":2}}}`)
+	if u, ok := usageFromUpstreamResponseEvent(alt); !ok || u.PromptTokens != 9 || u.CompletionTokens != 2 {
+		t.Fatalf("alt parse failed: %+v ok=%v", u, ok)
+	}
+
+	for _, noUsage := range [][]byte{
+		[]byte(`{"type":"response.output_text.delta","delta":"hi"}`),
+		[]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":0,"output_tokens":0}}}`),
+	} {
+		if _, ok := usageFromUpstreamResponseEvent(noUsage); ok {
+			t.Fatalf("expected no usage for %s", noUsage)
+		}
+	}
+}
+
+func TestPassThroughSSEStreamWithCallbackObservesAndCopies(t *testing.T) {
+	in := "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n"
+	var seen [][]byte
+	var out strings.Builder
+	if err := PassThroughSSEStreamWithCallback(strings.NewReader(in), &out, func(raw []byte) {
+		seen = append(seen, append([]byte(nil), raw...))
+	}); err != nil {
+		t.Fatalf("passthrough: %v", err)
+	}
+	if len(seen) != 1 || !strings.Contains(string(seen[0]), `"input_tokens":3`) {
+		t.Fatalf("callback did not observe the completed event: %v", seen)
+	}
+	// The stream must still be copied verbatim, including the DONE sentinel.
+	if !strings.Contains(out.String(), `"output_tokens":1`) || !strings.Contains(out.String(), "data: [DONE]") {
+		t.Fatalf("stream not copied verbatim:\n%s", out.String())
+	}
+}
+
 func TestUsageFromTransformedChunk(t *testing.T) {
 	final := []byte(`{"id":"x","object":"chat.completion.chunk","usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`)
 	u, ok := usageFromTransformedChunk(final)

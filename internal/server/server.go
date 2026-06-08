@@ -666,7 +666,20 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *http.Response, statu
 				return
 			}
 		} else {
-			if err := PassThroughSSEStream(resp.Body, out); err != nil {
+			// Passthrough (/v1/responses): record token usage from the raw
+			// upstream response.completed event so this endpoint contributes to
+			// codex_proxy_tokens_total too.
+			passthroughTokensRecorded := false
+			onEvent := func(raw []byte) {
+				if passthroughTokensRecorded {
+					return
+				}
+				if u, ok := usageFromUpstreamResponseEvent(raw); ok {
+					s.recordTokenUsage(model, u.PromptTokens, u.CompletionTokens)
+					passthroughTokensRecorded = true
+				}
+			}
+			if err := PassThroughSSEStreamWithCallback(resp.Body, out, onEvent); err != nil {
 				s.logger.Error().Err(err).Msg(fmt.Sprintf("Error streaming SSE response: %v", err))
 				return
 			}

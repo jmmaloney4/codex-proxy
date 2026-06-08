@@ -143,7 +143,7 @@ Exposed series:
 | `codex_proxy_build_info` | gauge | `version` | Constant `1`; version via `-ldflags "-X main.version=…"`. |
 | `codex_proxy_requests_total` | counter | `route`, `method`, `status` | `route` is the mux-matched pattern (bounded cardinality). |
 | `codex_proxy_request_duration_seconds` | histogram | `route`, `method` | Default Prometheus second buckets. |
-| `codex_proxy_tokens_total` | counter | `model`, `type` | `type` is `prompt`/`completion`; from upstream Codex usage, streaming and non-streaming. |
+| `codex_proxy_tokens_total` | counter | `model`, `type` | `type` is `prompt`/`completion`; from upstream Codex usage on both `/v1/chat/completions` (streaming and buffered) and `/v1/responses`. |
 | `codex_proxy_upstream_token_refreshes_total` | counter | `result` | OAuth refreshes triggered by upstream 401s (`success`/`failure`). |
 | `codex_proxy_credentials_expires_at_seconds` | gauge | – | When the active credential expires; refreshed in the background. Alert before it lapses into `app_session_terminated`. |
 

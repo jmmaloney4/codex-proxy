@@ -1334,6 +1334,14 @@ func RewriteSSEStreamWithCallback(r io.Reader, w io.Writer, model string, onEven
 // PassThroughSSEStream copies upstream SSE events directly to the downstream writer
 // without any transformation.
 func PassThroughSSEStream(r io.Reader, w io.Writer) error {
+	return PassThroughSSEStreamWithCallback(r, w, nil)
+}
+
+// PassThroughSSEStreamWithCallback copies an SSE stream verbatim (like
+// PassThroughSSEStream) while invoking onEvent with each raw upstream data
+// payload (excluding the [DONE] sentinel). The callback is for observation only
+// — e.g. extracting token usage — and must not mutate the bytes.
+func PassThroughSSEStreamWithCallback(r io.Reader, w io.Writer, onEvent func(raw []byte)) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var dataLines [][]byte
@@ -1349,6 +1357,10 @@ func PassThroughSSEStream(r io.Reader, w io.Writer) error {
 				return err
 			}
 			return nil
+		}
+
+		if onEvent != nil {
+			onEvent(raw)
 		}
 
 		if len(raw) > 0 {

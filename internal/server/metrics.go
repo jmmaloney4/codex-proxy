@@ -76,6 +76,44 @@ func usageFromTransformedChunk(chunk []byte) (Usage, bool) {
 	return *parsed.Usage, true
 }
 
+// usageFromUpstreamResponseEvent extracts token usage from a raw upstream Codex
+// SSE event on the /v1/responses passthrough path. Usage lives on the
+// "response.completed" event under response.usage, which (depending on the
+// model transport) uses input_tokens/output_tokens or prompt_tokens/
+// completion_tokens. The substring guard skips the many events that carry none.
+func usageFromUpstreamResponseEvent(raw []byte) (Usage, bool) {
+	if !bytes.Contains(raw, []byte(`"usage"`)) {
+		return Usage{}, false
+	}
+	var evt struct {
+		Response struct {
+			Usage *struct {
+				InputTokens      int `json:"input_tokens"`
+				OutputTokens     int `json:"output_tokens"`
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &evt); err != nil || evt.Response.Usage == nil {
+		return Usage{}, false
+	}
+	u := evt.Response.Usage
+	prompt := u.InputTokens
+	if prompt == 0 {
+		prompt = u.PromptTokens
+	}
+	completion := u.OutputTokens
+	if completion == 0 {
+		completion = u.CompletionTokens
+	}
+	if prompt == 0 && completion == 0 {
+		return Usage{}, false
+	}
+	return Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: u.TotalTokens}, true
+}
+
 func (s *Server) recordTokenRefresh(success bool) {
 	result := "failure"
 	if success {
@@ -144,6 +182,9 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		elapsed := time.Since(start).Seconds()
 
+		// r.Pattern is the mux-matched pattern (bounded cardinality). It is only
+		// empty for synthesised responses like the trailing-slash redirect; fall
+		// back to a constant so those never leak the raw URI into the label.
 		route := r.Pattern
 		if route == "" {
 			route = "unmatched"

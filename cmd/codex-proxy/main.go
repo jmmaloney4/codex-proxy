@@ -159,6 +159,13 @@ func startCredentialExpiryUpdater(srv *server.Server, credsFetcher credentials.C
 		return
 	}
 	go func() {
+		// A panic in this background loop must not take down the process; recover
+		// and stop updating the gauge rather than crashing the proxy.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error().Interface("panic", rec).Msg("Credential expiry updater stopped after panic")
+			}
+		}()
 		for {
 			if creds, err := oauth.GetFullCredentials(); err == nil && creds != nil && creds.ExpiresAt > 0 {
 				// ExpiresAt is unix milliseconds; the metric is unix seconds.
