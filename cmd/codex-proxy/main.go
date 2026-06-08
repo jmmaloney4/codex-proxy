@@ -4,13 +4,20 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/dvcrn/codex-proxy/internal/app"
 	"github.com/dvcrn/codex-proxy/internal/auth"
 	"github.com/dvcrn/codex-proxy/internal/credentials"
 	"github.com/dvcrn/codex-proxy/internal/logger"
+	"github.com/dvcrn/codex-proxy/internal/server"
 	"github.com/rs/zerolog"
 )
+
+// version is the build version surfaced in the codex_proxy_build_info metric.
+// Override at build time with: -ldflags "-X main.version=$(git describe --tags)".
+var version = "dev"
 
 func main() {
 	credsStore := flag.String("creds-store", "auto", "Credential store mode: auto|xdg|legacy|keychain|env")
@@ -95,6 +102,12 @@ func main() {
 
 	// Create server using shared setup
 	srv := app.NewServer(credsFetcher, log)
+	srv.SetBuildInfo(version)
+
+	// Start the metrics listener and credential-expiry updater (native build only;
+	// the Cloudflare Worker entrypoint does not include these).
+	startMetricsListener(srv, log)
+	startCredentialExpiryUpdater(srv, credsFetcher, log)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -103,6 +116,66 @@ func main() {
 
 	log.Info().Str("port", port).Msg("Starting server")
 	log.Fatal().Err(http.ListenAndServe(":"+port, srv)).Msg("Server failed to start")
+}
+
+// startMetricsListener serves Prometheus metrics on a dedicated port, separate
+// from the API. This is deliberate: the metrics port is meant to be reachable
+// only in-cluster (e.g. scraped by Grafana Alloy via the pod IP) and must never
+// be routed out through a Gateway/Ingress. It binds all interfaces — NOT
+// localhost — because Alloy runs as a node DaemonSet and scrapes pods across the
+// network-namespace boundary; a 127.0.0.1 bind would be invisible to it. Lock
+// access down with a NetworkPolicy at the cluster layer, not by bind address.
+//
+// METRICS_ADDR overrides the listen address (default ":9090"); set it to "off"
+// to disable the listener entirely.
+func startMetricsListener(srv *server.Server, log zerolog.Logger) {
+	addr := os.Getenv("METRICS_ADDR")
+	if addr == "" {
+		addr = ":9090"
+	}
+	if strings.EqualFold(addr, "off") {
+		log.Info().Msg("Metrics listener disabled (METRICS_ADDR=off)")
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", srv.MetricsHandler())
+
+	go func() {
+		log.Info().Str("metrics_addr", addr).Msg("Starting metrics listener")
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Error().Err(err).Str("metrics_addr", addr).Msg("Metrics listener stopped")
+		}
+	}()
+}
+
+// startCredentialExpiryUpdater keeps the codex_proxy_credentials_expires_at_seconds
+// gauge fresh even when there is no traffic, so alerts can fire before a token
+// lapses into app_session_terminated. It is a no-op for credential stores that
+// do not expose expiry (e.g. a bare env fetcher without it).
+func startCredentialExpiryUpdater(srv *server.Server, credsFetcher credentials.CredentialsFetcher, log zerolog.Logger) {
+	oauth, ok := credsFetcher.(credentials.OAuthCredentialsFetcher)
+	if !ok {
+		return
+	}
+	go func() {
+		// A panic in this background loop must not take down the process; recover
+		// and stop updating the gauge rather than crashing the proxy.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error().Interface("panic", rec).Msg("Credential expiry updater stopped after panic")
+			}
+		}()
+		for {
+			if creds, err := oauth.GetFullCredentials(); err == nil && creds != nil && creds.ExpiresAt > 0 {
+				// ExpiresAt is unix milliseconds; the metric is unix seconds.
+				srv.SetCredentialsExpiry(float64(creds.ExpiresAt) / 1000.0)
+			} else if err != nil {
+				log.Debug().Err(err).Msg("Could not read credential expiry for metrics")
+			}
+			time.Sleep(60 * time.Second)
+		}
+	}()
 }
 
 func maybeMigrateCredentials(targetPath string, disableRefresh bool, log zerolog.Logger) error {
