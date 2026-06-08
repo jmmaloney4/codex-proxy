@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dvcrn/codex-proxy/internal/credentials"
+	"github.com/dvcrn/codex-proxy/internal/metrics"
 	"github.com/rs/zerolog"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	httpClient   HTTPClient
 	mux          *http.ServeMux
 	logger       zerolog.Logger
+	metrics      *metrics.Registry
 }
 
 func New(logger zerolog.Logger, credsFetcher credentials.CredentialsFetcher) *Server {
@@ -49,6 +51,7 @@ func New(logger zerolog.Logger, credsFetcher credentials.CredentialsFetcher) *Se
 		httpClient:   NewHTTPClient(),
 		mux:          http.NewServeMux(),
 		logger:       logger,
+		metrics:      newMetrics(),
 	}
 
 	s.setupRoutes()
@@ -67,7 +70,7 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.loggingMiddleware(s.mux).ServeHTTP(w, r)
+	s.loggingMiddleware(s.metricsMiddleware(s.mux)).ServeHTTP(w, r)
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
@@ -263,6 +266,8 @@ func (s *Server) chatCompletionsHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Failed to process streaming response", http.StatusInternalServerError)
 		return
 	}
+
+	s.recordTokenUsage(normalizedModel, respObj.Usage.PromptTokens, respObj.Usage.CompletionTokens)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -518,11 +523,13 @@ func (s *Server) makeChatGPTRequestWithRetry(r *http.Request, url string, body [
 	// Attempt to refresh credentials
 	err = s.credsFetcher.RefreshCredentials()
 	if err != nil {
+		s.recordTokenRefresh(false)
 		s.logger.Error().Err(err).Msg("Failed to refresh credentials after 401 error")
 		// Return a 401 response since we couldn't refresh
 		return nil, http.StatusUnauthorized, fmt.Errorf("token expired and refresh failed: %w", err)
 	}
 
+	s.recordTokenRefresh(true)
 	s.logger.Info().Msg("Successfully refreshed credentials, retrying request...")
 
 	// Get the new credentials
@@ -627,10 +634,19 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *http.Response, statu
 
 		chunkCount := 0
 		streamStart := time.Now()
+		tokensRecorded := false
 
 		// Provide lightweight visibility into streaming progress without flooding logs.
 		debugFn := func(raw []byte, transformed []byte, done bool) {
 			logReasoningEvent(s.logger, raw)
+			// The SSE transformer carries token usage on its final chunk; record it
+			// once so streaming requests contribute to codex_proxy_tokens_total too.
+			if !tokensRecorded {
+				if u, ok := usageFromTransformedChunk(transformed); ok {
+					s.recordTokenUsage(model, u.PromptTokens, u.CompletionTokens)
+					tokensRecorded = true
+				}
+			}
 			if done {
 				s.logger.Debug().
 					Int("chunks", chunkCount).

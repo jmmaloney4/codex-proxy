@@ -92,6 +92,7 @@ export ACCOUNT_ID="your-account-id"
 ```bash
 export PORT="3000"  # default: 9879
 export ENV="production"  # default: development (console logs)
+export METRICS_ADDR=":9090"  # default: :9090; set to "off" to disable the metrics listener
 ```
 
 **Migration logs**:
@@ -125,6 +126,39 @@ just test   # Run tests
 - `POST /v1/chat/completions` - OpenAI chat completions-compatible endpoint
 - `POST /v1/responses` - OpenAI Responses-compatible endpoint (Codex)
 - `GET /health` - Health check
+- `GET /metrics` - Prometheus metrics (served on the **metrics port**, not the API port — see below)
+
+## Metrics
+
+The proxy exposes Prometheus metrics in the text exposition format (v0.0.4) at
+`GET /metrics`. To keep the implementation portable to the Cloudflare Worker
+target (`GOOS=js GOARCH=wasm`), the registry is dependency-free rather than using
+`prometheus/client_golang`. Metrics are only wired into the native binary
+(`cmd/codex-proxy`), not the Worker.
+
+Exposed series:
+
+| Metric | Type | Labels | Notes |
+| --- | --- | --- | --- |
+| `codex_proxy_build_info` | gauge | `version` | Constant `1`; version via `-ldflags "-X main.version=…"`. |
+| `codex_proxy_requests_total` | counter | `route`, `method`, `status` | `route` is the mux-matched pattern (bounded cardinality). |
+| `codex_proxy_request_duration_seconds` | histogram | `route`, `method` | Default Prometheus second buckets. |
+| `codex_proxy_tokens_total` | counter | `model`, `type` | `type` is `prompt`/`completion`; from upstream Codex usage, streaming and non-streaming. |
+| `codex_proxy_upstream_token_refreshes_total` | counter | `result` | OAuth refreshes triggered by upstream 401s (`success`/`failure`). |
+| `codex_proxy_credentials_expires_at_seconds` | gauge | – | When the active credential expires; refreshed in the background. Alert before it lapses into `app_session_terminated`. |
+
+### Metrics listener and access control
+
+Metrics are served on a **separate listener** (`METRICS_ADDR`, default `:9090`),
+distinct from the API port, so the metrics surface can be locked down
+independently of the API. It binds all interfaces — **not** `127.0.0.1` — because
+in Kubernetes a node-level scraper (e.g. Grafana Alloy as a DaemonSet) reaches
+pods across the network-namespace boundary via the pod IP; a loopback bind would
+be unreachable to it.
+
+To restrict access, keep the metrics port **off any Gateway/Ingress** (never
+route it out of the cluster) and gate it with a `NetworkPolicy` that only admits
+the scraper. Set `METRICS_ADDR=off` to disable the listener entirely.
 
 ## Models and Reasoning Mappings
 
