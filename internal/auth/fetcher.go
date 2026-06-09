@@ -39,6 +39,9 @@ func (o *OAuthFetcher) GetCredentials() (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get full credentials: %w", err)
 	}
+	if creds == nil {
+		return "", "", fmt.Errorf("failed to get full credentials: credentials are nil")
+	}
 
 	// Trust the token's own `exp` claim over the stored expiresAt, which can
 	// drift (wrong units, hand-edited secrets, a refresh that happened in
@@ -177,6 +180,12 @@ func (o *OAuthFetcher) checkAndRefreshToken() {
 	if err != nil {
 		if o.logger != nil {
 			o.logger.Error().Err(err).Msg("Background refresh: failed to get credentials")
+		}
+		return
+	}
+	if creds == nil {
+		if o.logger != nil {
+			o.logger.Error().Msg("Background refresh: credentials are nil")
 		}
 		return
 	}

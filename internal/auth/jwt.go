@@ -13,7 +13,7 @@ import (
 // trusting separately-stored fields) is how the upstream codex-rs CLI behaves
 // and keeps us from ever using a token whose stored metadata has drifted.
 type jwtClaims struct {
-	Exp    float64 `json:"exp"`
+	Exp    int64 `json:"exp"`
 	OpenAI struct {
 		ChatGPTAccountID string `json:"chatgpt_account_id"`
 	} `json:"https://api.openai.com/auth"`
@@ -47,7 +47,7 @@ func parseJWTClaims(token string) (jwtClaims, bool) {
 // never worse than before.
 func AccessTokenExpiresAtMs(accessToken string, fallbackMs int64) int64 {
 	if c, ok := parseJWTClaims(accessToken); ok && c.Exp > 0 {
-		return int64(c.Exp) * 1000
+		return c.Exp * 1000
 	}
 	return fallbackMs
 }

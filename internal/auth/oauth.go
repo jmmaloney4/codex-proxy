@@ -24,6 +24,12 @@ const (
 	TokenExpiryBuffer = 10 * time.Minute
 )
 
+// refreshHTTPClient is used for token-refresh requests. It carries an explicit
+// timeout because the refresh runs while OAuthFetcher holds its write lock; a
+// hung upstream on the default (timeout-less) client would otherwise block every
+// concurrent GetCredentials indefinitely.
+var refreshHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 // TokenExpired checks if the token is expired or will expire soon
 func TokenExpired(expiresAtMs int64) bool {
 	bufferMs := TokenExpiryBuffer.Milliseconds()
@@ -44,14 +50,16 @@ func RefreshToken(refreshToken string) (*TokenRefreshResponse, error) {
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", ClientID)
 
-	resp, err := http.Post(OAuthTokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	resp, err := refreshHTTPClient.Post(OAuthTokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to make refresh request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// Bound the error-body read: this is an untrusted upstream response and
+		// we only need enough of it to make the error message useful.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
